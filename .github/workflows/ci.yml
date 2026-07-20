@@ -67,7 +67,7 @@ jobs:
               echo "aws_secret_key_secret=AWS_SECRET_ACCESS_KEY_DEV"  >> $GITHUB_OUTPUT
               echo "helm_repo=infra"                 >> $GITHUB_OUTPUT
               echo "helm_repo_org=Payinvert"         >> $GITHUB_OUTPUT
-              echo "helm_base_path=helm-charts/document-ocr" >> $GITHUB_OUTPUT
+              echo "helm_base_path=helm-charts/turbosend-backend" >> $GITHUB_OUTPUT
               echo "helm_values_file=values.yaml"    >> $GITHUB_OUTPUT
               echo "infra_branch=dev-linode"          >> $GITHUB_OUTPUT
               echo "image_tag_prefix=dev-linode-"    >> $GITHUB_OUTPUT
