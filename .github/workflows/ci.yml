@@ -1,0 +1,270 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - ci
+      - dev
+      - staging
+  pull_request:
+    branches:
+      - main
+      - ci
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: ${{ github.event.repository.name }}
+  SERVICE_NAME: ${{ github.event.repository.name }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Determine environment-specific configuration
+  # ---------------------------------------------------------------------------
+  configure:
+    name: Configure Environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.config.outputs.environment }}
+      aws_key_id_secret: ${{ steps.config.outputs.aws_key_id_secret }}
+      aws_secret_key_secret: ${{ steps.config.outputs.aws_secret_key_secret }}
+      helm_repo: ${{ steps.config.outputs.helm_repo }}
+      helm_repo_org: ${{ steps.config.outputs.helm_repo_org }}
+      helm_base_path: ${{ steps.config.outputs.helm_base_path }}
+      helm_values_file: ${{ steps.config.outputs.helm_values_file }}
+      infra_branch: ${{ steps.config.outputs.infra_branch }}
+      image_tag_prefix: ${{ steps.config.outputs.image_tag_prefix }}
+      should_deploy: ${{ steps.config.outputs.should_deploy }}
+    steps:
+      - name: Set environment config
+        id: config
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          EVENT="${{ github.event_name }}"
+
+          # Only deploy on push (not on pull_request)
+          if [[ "$EVENT" == "push" ]]; then
+            echo "should_deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+          case "$BRANCH" in
+            main|ci)
+              echo "environment=production"          >> $GITHUB_OUTPUT
+              echo "aws_key_id_secret=AWS_ACCESS_KEY_ID_PROD"       >> $GITHUB_OUTPUT
+              echo "aws_secret_key_secret=AWS_SECRET_ACCESS_KEY_PROD" >> $GITHUB_OUTPUT
+              echo "helm_repo=Infra-Optimization"    >> $GITHUB_OUTPUT
+              echo "helm_repo_org=Payinvert"         >> $GITHUB_OUTPUT
+              echo "helm_base_path=turbosend-stack"    >> $GITHUB_OUTPUT
+              echo "helm_values_file=values.yaml"    >> $GITHUB_OUTPUT
+              echo "infra_branch=main"               >> $GITHUB_OUTPUT
+              echo "image_tag_prefix="               >> $GITHUB_OUTPUT
+              ;;
+            dev)
+              echo "environment=dev"                 >> $GITHUB_OUTPUT
+              echo "aws_key_id_secret=AWS_ACCESS_KEY_ID_DEV"        >> $GITHUB_OUTPUT
+              echo "aws_secret_key_secret=AWS_SECRET_ACCESS_KEY_DEV"  >> $GITHUB_OUTPUT
+              echo "helm_repo=infra"                 >> $GITHUB_OUTPUT
+              echo "helm_repo_org=Payinvert"         >> $GITHUB_OUTPUT
+              echo "helm_base_path=helm-charts/turbosend-backend" >> $GITHUB_OUTPUT
+              echo "helm_values_file=values.yaml"    >> $GITHUB_OUTPUT
+              echo "infra_branch=dev-linode"          >> $GITHUB_OUTPUT
+              echo "image_tag_prefix=dev-linode-"    >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo "environment=staging"             >> $GITHUB_OUTPUT
+              echo "aws_key_id_secret=AWS_ACCESS_KEY_ID_DEV"        >> $GITHUB_OUTPUT
+              echo "aws_secret_key_secret=AWS_SECRET_ACCESS_KEY_DEV"  >> $GITHUB_OUTPUT
+              echo "helm_repo=infra"                 >> $GITHUB_OUTPUT
+              echo "helm_repo_org=Payinvert"         >> $GITHUB_OUTPUT
+              echo "helm_base_path=helm-charts/document-ocr" >> $GITHUB_OUTPUT
+              echo "helm_values_file=values-staging.yaml" >> $GITHUB_OUTPUT
+              echo "infra_branch=dev-linode"            >> $GITHUB_OUTPUT
+              echo "image_tag_prefix=staging-"       >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "environment=staging"             >> $GITHUB_OUTPUT
+              echo "aws_key_id_secret=AWS_ACCESS_KEY_ID_DEV"        >> $GITHUB_OUTPUT
+              echo "aws_secret_key_secret=AWS_SECRET_ACCESS_KEY_DEV"  >> $GITHUB_OUTPUT
+              echo "helm_repo=infra"                 >> $GITHUB_OUTPUT
+              echo "helm_repo_org=Payinvert"         >> $GITHUB_OUTPUT
+              echo "helm_base_path=helm-charts/document-ocr" >> $GITHUB_OUTPUT
+              echo "helm_values_file=values-staging.yaml" >> $GITHUB_OUTPUT
+              echo "infra_branch=staging"            >> $GITHUB_OUTPUT
+              echo "image_tag_prefix=staging-"       >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Print config
+        run: |
+          echo "Environment:    ${{ steps.config.outputs.environment }}"
+          echo "Helm repo:      ${{ steps.config.outputs.helm_repo_org }}/${{ steps.config.outputs.helm_repo }}"
+          echo "Helm base path: ${{ steps.config.outputs.helm_base_path }}"
+          echo "Values file:    ${{ steps.config.outputs.helm_values_file }}"
+          echo "Infra branch:   ${{ steps.config.outputs.infra_branch }}"
+          echo "Should deploy:  ${{ steps.config.outputs.should_deploy }}"
+
+  # ---------------------------------------------------------------------------
+  # 2. Build Docker image and push to ECR
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    name: Build and Push to ECR
+    needs: configure
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+      image-uri: ${{ steps.build-image.outputs.image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets[needs.configure.outputs.aws_key_id_secret] }}
+          aws-secret-access-key: ${{ secrets[needs.configure.outputs.aws_secret_key_secret] }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        uses: int128/create-ecr-repository-action@v1
+        with:
+          repository: ${{ env.ECR_REPOSITORY }}
+          public: false
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=raw,value=${{ needs.configure.outputs.image_tag_prefix }}${{ github.run_number }}-${{ github.sha }}
+            type=raw,value=${{ needs.configure.outputs.image_tag_prefix }}${{ github.run_number }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        id: build-image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+
+      - name: Image digest
+        run: |
+          echo "Image pushed: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.version }}"
+
+  # ---------------------------------------------------------------------------
+  # 3. Update Helm chart in infrastructure repo
+  # ---------------------------------------------------------------------------
+  update-helm-chart:
+    name: Update Helm Chart (${{ needs.configure.outputs.environment }})
+    needs: [configure, build-and-push]
+    runs-on: ubuntu-latest
+    if: needs.configure.outputs.should_deploy == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets[needs.configure.outputs.aws_key_id_secret] }}
+          aws-secret-access-key: ${{ secrets[needs.configure.outputs.aws_secret_key_secret] }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Checkout infrastructure repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.configure.outputs.helm_repo_org }}/${{ needs.configure.outputs.helm_repo }}
+          token: ${{ secrets.REPO_TOKEN }}
+          path: infrastructure
+          ref: ${{ needs.configure.outputs.infra_branch }}
+
+
+      - name: Update Helm values file
+        run: |
+          CHART_PATH="infrastructure/${{ needs.configure.outputs.helm_base_path }}/${{ env.SERVICE_NAME }}"
+          VALUES_FILE="${{ needs.configure.outputs.helm_values_file }}"
+
+          if [ ! -d "$CHART_PATH" ]; then
+            echo "::error::Chart path not found: $CHART_PATH"
+            exit 1
+          fi
+
+          cd "$CHART_PATH"
+
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image-tag }}"
+
+          # Install yq if not available
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+
+          echo "Updating $VALUES_FILE with image: $IMAGE_URI:$IMAGE_TAG"
+          yq eval ".image.repository = \"$IMAGE_URI\"" -i "$VALUES_FILE"
+          yq eval ".image.tag = \"$IMAGE_TAG\"" -i "$VALUES_FILE"
+
+          echo "Updated $VALUES_FILE:"
+          cat "$VALUES_FILE" | grep -A 2 "image:"
+
+      - name: Commit and push changes
+        run: |
+          cd infrastructure
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add "${{ needs.configure.outputs.helm_base_path }}/${{ env.SERVICE_NAME }}/"
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update ${{ env.SERVICE_NAME }} image to ${{ needs.build-and-push.outputs.image-tag }} [${{ needs.configure.outputs.environment }}]
+
+          - Tag: ${{ needs.build-and-push.outputs.image-tag }}
+          - Environment: ${{ needs.configure.outputs.environment }}
+          - Triggered by: ${{ github.actor }}
+          - Source commit: ${{ github.sha }}"
+
+            git push origin ${{ needs.configure.outputs.infra_branch }}
+            echo "Changes pushed successfully"
+          fi
+
+      - name: Deployment summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| *Service* | ${{ env.SERVICE_NAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| *Environment* | ${{ needs.configure.outputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| *Image Tag* | ${{ needs.build-and-push.outputs.image-tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| *Infra Repo* | ${{ needs.configure.outputs.helm_repo_org }}/${{ needs.configure.outputs.helm_repo }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| *Infra Branch* | ${{ needs.configure.outputs.infra_branch }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| *Values File* | ${{ needs.configure.outputs.helm_values_file }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| *Commit* | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| *Triggered by* | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
