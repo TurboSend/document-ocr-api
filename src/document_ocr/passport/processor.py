@@ -524,6 +524,11 @@ def _parse_names_from_line1(line1: str):
     return surname, given_names
 
 
+def _build_full_name(given_names: str, surname: str) -> str:
+    """Join passport names given-names-first, matching the NIN slip output."""
+    return " ".join(part.strip() for part in (given_names or "", surname or "") if part.strip())
+
+
 def _should_prefer_visual_name(mrz_name: str, visual_name: str) -> bool:
     """Decide whether printed visual text is better than the MRZ name text."""
     visual_clean = _strip_field_words(visual_name)
@@ -859,6 +864,7 @@ def extract_mrz_from_image(file_stream, country_hint: str | None = None):
     return with_glance(
         {
             "success": True,
+            "document_type": "PASSPORT",
             "verification": {
                 "is_valid_format": True,
                 "country": {
@@ -875,6 +881,7 @@ def extract_mrz_from_image(file_stream, country_hint: str | None = None):
             "data": {
                 "surname": surname,
                 "given_names": given_names,
+                "full_name": _build_full_name(given_names, surname),
                 "passport_number": passport_number,
                 "nationality": nationality,
                 "date_of_birth": format_date(date_of_birth),
