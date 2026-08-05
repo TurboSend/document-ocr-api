@@ -1,0 +1,44 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  deploy-dev:
+    name: Deploy Dev
+    if: github.ref == 'refs/heads/dev'
+    uses: TurboSend/Infra-Workflows/.github/workflows/reusable-dev-linode-docker-ecr-infra.yml@main
+    with:
+      ecr-repository: document-ocr-api
+      service-name: document-ocr-api
+      update-mode: values
+      values-path: helm-charts/turbosend-backend/document-ocr-api/values.yaml
+      image-tag-prefix: dev-linode-
+      environment-name: dev
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+      REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
+
+  deploy-prod:
+    name: Deploy Prod
+    if: github.ref == 'refs/heads/main'
+    uses: TurboSend/Infra-Workflows/.github/workflows/reusable-docker-ecr-helm.yml@main
+    with:
+      ecr-repository: document-ocr-api
+      service-name: document-ocr-api
+      helm-stack-path: turbosend-stack
+      values-file: values.yaml
+      infra-ref: main
+      environment-name: production
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+      REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
